@@ -274,6 +274,9 @@
     },
     init: function(userOptions = {}) {
       const opts = extend(extend({}, DEFAULTS), userOptions);
+
+      opts.cssVars = extend({}, DEFAULTS.cssVars); //deep merge for cssVars
+      if (userOptions.cssVars) extend(opts.cssVars, userOptions.cssVars);
       if (!opts.publicKey) throw new Error('BugerZ: publicKey is required');
       injectStyles(opts.cssVars);
       const consoleBuf = new CircularBuffer(opts.consoleBufferSize);
