@@ -6,7 +6,11 @@
     placement: 'bottom-right',   // 'bottom-left' | 'top-right' | 'top-left'
     addButton: true,
     buttonText: 'Report Bug',
-    autoTrigger: false,
+    openOnInit: false,
+    autoSendOnError: false, 
+    autoSendLimit:    5,     // max number of auto‐reports per session
+    autoSendDelay:    1000,  // debounce delay in ms, reset auto-send if new error occurs
+    autoSendMaxDebounceCount: 3,     // optional: how many times to postpone before forcing
     trackConsole: true,
     consoleBufferSize: 100,
     trackEvents: false,
@@ -214,12 +218,52 @@
     get()   { return this.buf.slice(); }
   }
 
-  function hijackConsole(buffer) {
+  function hijackConsole(opts, consoleBuffer, eventBuffer) {
+    let sendCount = 0;
+    let debounceTimer = null;
+    let debounceRuns = 0;
+    let lastFields = null;
+
+    const scheduleSend = () => {
+      if (sendCount >= opts.autoSendLimit) return;
+      if (debounceTimer && debounceRuns < opts.maxDebounceCount) {
+        clearTimeout(debounceTimer);
+        debounceRuns++;
+      }
+      debounceTimer = setTimeout(async () => {
+        if(sendCount < opts.autoSendLimit && opts.publicKey) {
+          try {
+            await sendReport(opts, consoleBuffer, eventBuffer, lastFields);
+            sendCount++;
+            debounceRuns = 0; // reset debounce count after successful send
+          } catch (err) {
+            console.debug('BugerZ: Error sending auto report:', err);
+          }
+        }
+        debounceTimer = null; 
+        debounceRuns = 0; 
+      }, opts.autoSendDelay);
+    };
+
     ['log','warn','error','info'].forEach(level => {
       const orig = console[level];
       console[level] = function(...args) {
-        buffer.push({ level, args, timestamp: new Date().toISOString() });
+        consoleBuffer.push({ level, args, timestamp: new Date().toISOString() });
         orig.apply(console, args);
+        if (level === 'error') {
+          // send error report immediately if enabled
+          if (opts && opts.autoSendOnError) {
+            if (opts.publicKey) {
+              lastFields = { description: `Auto‐triggered on console.${level}:\n${args.join(' ')}`};
+              scheduleSend();
+              // sendReport(opts, consoleBuffer, eventBuffer, {
+              //       description: `Auto‐triggered on console.error, triggered:\n ${args.join(' ')}`,
+              // }).catch(err => console.debug('BugerZ: Error sending error report:', err));
+            } else {
+              console.debug('BugerZ: publicKey not set, cannot send error report');
+            }
+          }
+        }
       };
     });
   }
@@ -254,6 +298,66 @@
     return form;
   }
 
+  async function sendReport(opts, consoleBuf, eventBuf, fields = {}) {
+    const data = {
+      publicKey: opts.publicKey,
+      url: location.href,
+      title: document.title,
+      userAgent: navigator.userAgent,
+      timestamp: new Date().toISOString(),
+      console: consoleBuf.get(),
+      events: opts.trackEvents ? eventBuf.get() : undefined,
+      fields: fields || {}
+    };
+
+    if(opts.screenshot) {
+      await new Promise(res => {
+        if (window.htmlToImage) return res();
+        const s = document.createElement('script');
+        s.src = opts.screenshotLibUrl;
+        s.onload = res;
+        document.head.appendChild(s);
+      });
+      try {
+        const imgOpts = opts.screenshotOptions || {};
+        if (imgOpts.type === 'jpeg') {
+          data.screenshot = await window.htmlToImage.toJpeg(
+            document.body,
+            {
+              quality: imgOpts.quality,
+              pixelRatio: imgOpts.pixelRatio,
+              width: imgOpts.width,
+              height: imgOpts.height
+            }
+          );
+        } else {
+          data.screenshot = await window.htmlToImage.toPng(
+            document.body,
+            { pixelRatio: imgOpts.pixelRatio }
+          );
+        }
+      } catch (err) {
+        console.debug('Screenshot failed:', err);
+      }
+    }
+    try {
+      console.log('BugerZ: Sending report with data:', data, opts.endpoint);
+      const res = await fetch(opts.endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data)
+      });
+      const resData = await res.json();
+      if (!resData.ok) throw new Error(resData.message || res.statusText || res.status);  
+      // opts.onSuccess(resData);
+      return resData;
+    } catch (err) {
+      console.debug('BugerZ: Error sending report:', err);
+      // opts.onError(err.message);
+      throw err; // re-throw to allow custom handling
+    }
+  }
+
   window.BugerZ = {
     show: function() {
       const ov = document.getElementById('bugerz-overlay');
@@ -280,8 +384,8 @@
       if (!opts.publicKey) throw new Error('BugerZ: publicKey is required');
       injectStyles(opts.cssVars);
       const consoleBuf = new CircularBuffer(opts.consoleBufferSize);
-      if (opts.trackConsole) hijackConsole(consoleBuf);
       const eventBuf = opts.trackEvents ? new CircularBuffer(opts.eventBufferSize) : null;
+      if (opts.trackConsole) hijackConsole(opts, consoleBuf, eventBuf);
       if (opts.trackEvents) trackEvents(eventBuf);
 
       let overlay = document.getElementById('bugerz-overlay');
@@ -312,7 +416,7 @@
         btn.addEventListener('click', () => this.show());
       }
 
-      if (opts.autoTrigger) this.show();
+      if (opts.openOnInit) this.show();
 
       form.addEventListener('submit', async e => {
         e.preventDefault();
@@ -321,68 +425,17 @@
         const spinner = container.querySelector('#bugerz-spinner');
         spinner.style.display = 'block';
 
-        const data = {
-          publicKey: opts.publicKey,
-          url: location.href,
-          title: document.title,
-          userAgent: navigator.userAgent,
-          timestamp: new Date().toISOString(),
-          console: consoleBuf.get(),
-          events: opts.trackEvents ? eventBuf.get() : undefined,
-          fields: {}
-        };
+        let fields = {};
         Array.from(form.elements).forEach(el => {
-          if (el.name) data.fields[el.name] = el.type === 'checkbox' ? el.checked : el.value;
+          if (el.name) fields[el.name] = el.type === 'checkbox' ? el.checked : el.value;
         });
 
-        if (opts.screenshot) {
-          await new Promise(res => {
-            if (window.htmlToImage) return res();
-            const s = document.createElement('script');
-            s.src = opts.screenshotLibUrl;
-            s.onload = res;
-            document.head.appendChild(s);
-          });
-          try {
-            // data.screenshot = await window.htmlToImage.toPng(document.body);
-            const imgOpts = opts.screenshotOptions || {};
-            if (imgOpts.type === 'jpeg') {
-              data.screenshot = await window.htmlToImage.toJpeg(
-                document.body,
-                {
-                  quality: imgOpts.quality,
-                  pixelRatio: imgOpts.pixelRatio,
-                  width: imgOpts.width,
-                  height: imgOpts.height
-                }
-              );
-            } else {
-              // fallback to PNG but allow downscaling
-              data.screenshot = await window.htmlToImage.toPng(
-                document.body,
-                { pixelRatio: imgOpts.pixelRatio }
-              );
-            }
-          } catch (err) {
-            console.warn('Screenshot failed:', err);
-          }
-        }
-
         try {
-          console.log('BugerZ: Sending report with data:', data, opts.endpoint);
-          const res = await fetch(opts.endpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(data)
-          });
-          const resData = await res.json();
-          if (!resData.ok) throw new Error(resData.message || res.statusText || res.status);
-          
-          opts.onSuccess(resData);
+          let sent = await sendReport( opts, consoleBuf, eventBuf, fields);
           form.reset();
+          if (opts.onSuccess) opts.onSuccess(sent);
         } catch (err) {
-          // console.error('BugerZ: Error sending report:', err);
-          opts.onError(err.message);
+          if (opts.onError) opts.onError(err);
         } finally {
           spinner.style.display = 'none';
           form.classList.remove('loading');
