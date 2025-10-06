@@ -1,4 +1,4 @@
-# bugerz
+# Bugerz
 Bugerz Client
 
 
