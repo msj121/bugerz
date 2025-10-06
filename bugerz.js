@@ -1,3 +1,40 @@
+// Lightweight stub: expose a minimal `window.Bugerz` / `window.BugerZ` immediately
+// so callers can safely call .init() before the full client script finishes loading.
+;(function(){
+  try {
+    if (typeof window !== 'undefined') {
+      // if neither real object exists, provide a stub that queues calls
+      if (!window.BugerZ && !window.Bugerz) {
+        const _queue = [];
+        const stub = {
+          _q: _queue,
+          _enqueue(fnName, args) { this._q.push({ fn: fnName, args: Array.from(args) }); },
+          init() { this._enqueue('init', arguments); },
+          show() { this._enqueue('show', arguments); },
+          hide() { this._enqueue('hide', arguments); },
+          toggle() { this._enqueue('toggle', arguments); }
+        };
+        window.Bugerz = window.BugerZ = stub;
+        // notify consumers that the client script is available to be initialized
+        try {
+          const ev = new CustomEvent('bugerz:available', { detail: { instance: stub } });
+          document.dispatchEvent(ev);
+        } catch (e) {
+          try {
+            const ev2 = document.createEvent('Event');
+            ev2.initEvent('bugerz:available', true, true);
+            document.dispatchEvent(ev2);
+          } catch (e2) {
+            /* ignore */
+          }
+        }
+      }
+    }
+  } catch (e) {
+    /* ignore stub failures */
+  }
+})();
+
 (function(window, document){
   // Default configuration
   const DEFAULTS = {
@@ -462,4 +499,33 @@
       }
     }
   };
+  // replay queued stub calls (if the stub created a queue)
+  try {
+    if (typeof window !== 'undefined') {
+      // ensure alias
+      try { window.Bugerz = window.BugerZ; } catch (err) { /* ignore */ }
+
+      const maybeStub = window.Bugerz || window.BugerZ;
+      if (maybeStub && maybeStub._q && Array.isArray(maybeStub._q)) {
+        const q = maybeStub._q.slice();
+        // clear the stub queue to avoid double replay
+        maybeStub._q.length = 0;
+        q.forEach(item => {
+          try {
+            const fn = window.BugerZ[item.fn] || window.Bugerz && window.Bugerz[item.fn];
+            if (typeof fn === 'function') fn.apply(window.BugerZ, item.args);
+          } catch (e) {
+            console.debug('BugerZ: error replaying queued call', e);
+          }
+        });
+      }
+
+      // dispatch a final 'available' event after real init is set up
+      try {
+        const ev = new CustomEvent('bugerz:available:ready', { detail: { instance: window.BugerZ } });
+        document.dispatchEvent(ev);
+      } catch (e) { /* ignore */ }
+    }
+  } catch (e) { /* ignore */ }
+
 })(window, document);
