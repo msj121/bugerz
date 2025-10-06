@@ -19,12 +19,12 @@
     showPublicCheckbox: false,
     showEmailField: true,
     screenshot: true,
-    screenshotLibUrl: 'https://unpkg.com/html-to-image@1.11.13/dist/html-to-image.js',//'https://cdn.jsdelivr.net/npm/html-to-image@1.8.0/dist/html-to-image.min.js',
+    screenshotLibUrl: 'https://unpkg.com/html-to-image@1.11.13/dist/html-to-image.js',
     formContainerSelector: null,
     screenshotOptions: {
       type: 'jpeg',        // 'png' or 'jpeg'
-      quality: 1,         // only for jpeg: 0.0–1.0
-      pixelRatio: 1,      // scale down to 50% resolution
+      quality: 0.5,         // only for jpeg: 0.0–1.0
+      pixelRatio: 0.5,      // scale down to 50% resolution
       // width: 800,        // you can also force an explicit width (only jpg)
       // height: 600
     },
@@ -256,9 +256,6 @@
             if (opts.publicKey) {
               lastFields = { description: `Auto‐triggered on console.${level}:\n${args.join(' ')}`};
               scheduleSend();
-              // sendReport(opts, consoleBuffer, eventBuffer, {
-              //       description: `Auto‐triggered on console.error, triggered:\n ${args.join(' ')}`,
-              // }).catch(err => console.debug('BugerZ: Error sending error report:', err));
             } else {
               console.debug('BugerZ: publicKey not set, cannot send error report');
             }
@@ -341,7 +338,6 @@
       }
     }
     try {
-      console.log('BugerZ: Sending report with data:', data, opts.endpoint);
       const res = await fetch(opts.endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -441,6 +437,29 @@
           form.classList.remove('loading');
         }
       });
+      // mark initialized and expose a stable alias
+      try {
+        this._initialized = true;
+        // Provide a lowercase alias for callers using window.Bugerz
+        if (typeof window !== 'undefined') {
+          try { window.Bugerz = window.BugerZ; } catch (err) { /* ignore read-only */ }
+          // Dispatch a CustomEvent so external code can wait for readiness
+          try {
+            const ev = new CustomEvent('bugerz:ready', { detail: { instance: window.BugerZ } });
+            document.dispatchEvent(ev);
+          } catch (err) {
+            // older browsers fallback: create and dispatch using document.createEvent
+            try {
+              const ev2 = document.createEvent('Event');
+              ev2.initEvent('bugerz:ready', true, true);
+              ev2.detail = { instance: window.BugerZ };
+              document.dispatchEvent(ev2);
+            } catch (e) { /* give up silently */ }
+          }
+        }
+      } catch (e) {
+        // no-op
+      }
     }
   };
 })(window, document);
