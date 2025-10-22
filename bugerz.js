@@ -25,9 +25,15 @@
       type: 'jpeg',        // 'png' or 'jpeg'
       quality: 0.5,         // only for jpeg: 0.0–1.0
       pixelRatio: 0.5,      // scale down to 50% resolution
+      skipFonts: true,      // skip font embedding to avoid CORS issues
+      cacheBust: false,     // disable cache busting for better performance
+      imagePlaceholder: undefined,  // optional: placeholder for failed cross-origin images
+      filter: undefined     // optional: function to filter out problematic nodes
       // width: 800,        // you can also force an explicit width (only jpg)
       // height: 600
     },
+    // Quick flag to auto-filter cross-origin resources (images, iframes, stylesheets)
+    filterCrossOrigin: false,
     cssVars: {
       '--bz-bg': '#ffffff',
       '--bz-color': '#333333',
@@ -317,21 +323,52 @@
       });
       try {
         const imgOpts = opts.screenshotOptions || {};
-        if (imgOpts.type === 'jpeg') {
-          data.screenshot = await window.htmlToImage.toJpeg(
-            document.body,
-            {
-              quality: imgOpts.quality,
-              pixelRatio: imgOpts.pixelRatio,
-              width: imgOpts.width,
-              height: imgOpts.height
+        
+        // Build the options object for html-to-image
+        const htmlToImageOpts = {
+          quality: imgOpts.quality,
+          pixelRatio: imgOpts.pixelRatio,
+          width: imgOpts.width,
+          height: imgOpts.height,
+          skipFonts: imgOpts.skipFonts,
+          cacheBust: imgOpts.cacheBust
+        };
+        
+        // Add imagePlaceholder if provided
+        if (imgOpts.imagePlaceholder) {
+          htmlToImageOpts.imagePlaceholder = imgOpts.imagePlaceholder;
+        }
+        
+        // Add filter function - either custom or auto cross-origin filter
+        if (imgOpts.filter && typeof imgOpts.filter === 'function') {
+          // User provided custom filter
+          htmlToImageOpts.filter = imgOpts.filter;
+        } else if (opts.filterCrossOrigin) {
+          // Auto-filter cross-origin resources
+          htmlToImageOpts.filter = function(node) {
+            // Skip external images and iframes that cause CORS issues
+            if (node.tagName === 'IMG' || node.tagName === 'IFRAME') {
+              const src = node.src || (node.getAttribute && node.getAttribute('src')) || '';
+              // Skip if it's a cross-origin resource (not same origin or data URI)
+              if (src && !src.startsWith('data:') && !src.startsWith(window.location.origin) && !src.startsWith('/')) {
+                return false; // exclude this node
+              }
             }
-          );
+            // Skip external stylesheets
+            if (node.tagName === 'LINK' && node.rel === 'stylesheet') {
+              const href = node.href || '';
+              if (href && !href.startsWith(window.location.origin) && !href.startsWith('/')) {
+                return false;
+              }
+            }
+            return true;
+          };
+        }
+        
+        if (imgOpts.type === 'jpeg') {
+          data.screenshot = await window.htmlToImage.toJpeg(document.body, htmlToImageOpts);
         } else {
-          data.screenshot = await window.htmlToImage.toPng(
-            document.body,
-            { pixelRatio: imgOpts.pixelRatio }
-          );
+          data.screenshot = await window.htmlToImage.toPng(document.body, htmlToImageOpts);
         }
       } catch (err) {
         console.debug('Screenshot failed:', err);
