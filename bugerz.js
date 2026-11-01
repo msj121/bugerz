@@ -370,6 +370,71 @@
     };
   }
 
+  let screenshotSequence = 0;
+
+  async function captureScreenshot(options, type) {
+    // html-to-image copies styles and children, but not element scroll offsets.
+    // Mark scrolled panels so we can restore their visible contents in the SVG.
+    const root = document.documentElement;
+    const attribute = `data-bugerz-scroll-${++screenshotSequence}`;
+    const panels = Array.from(root.querySelectorAll('*')).filter(node =>
+      node !== document.scrollingElement && (node.scrollTop || node.scrollLeft));
+    if (!panels.length) {
+      return type === 'jpeg' ? window.htmlToImage.toJpeg(root, options) : window.htmlToImage.toPng(root, options);
+    }
+
+    let svgUrl;
+    const offsets = panels.map(node => ({
+      top: node.scrollTop, left: node.scrollLeft,
+      width: node.clientWidth,
+      pageHeight: node.scrollHeight, outerWidth: node.offsetWidth, outerHeight: node.offsetHeight
+    }));
+    try {
+      panels.forEach((node, index) => node.setAttribute(attribute, index));
+      svgUrl = await window.htmlToImage.toSvg(root, options);
+    } finally {
+      panels.forEach(node => node.removeAttribute(attribute));
+    }
+    const svg = new DOMParser().parseFromString(decodeURIComponent(svgUrl.slice(svgUrl.indexOf(',') + 1)), 'image/svg+xml');
+    svg.querySelectorAll(`[${attribute}]`).forEach(content => {
+      const offset = offsets[Number(content.getAttribute(attribute))];
+      content.removeAttribute(attribute);
+      const viewport = svg.createElementNS('http://www.w3.org/1999/xhtml', 'div');
+      viewport.style.cssText = content.style.cssText;
+      Object.assign(viewport.style, {
+        display: content.style.display.startsWith('inline') ? 'inline-block' : 'block',
+        boxSizing: 'border-box', padding: '0', overflow: 'hidden',
+        width: `${offset.outerWidth}px`, height: `${offset.outerHeight}px`
+      });
+      content.replaceWith(viewport);
+      viewport.appendChild(content);
+      // Keep the panel's original flex/grid layout and clipping. Moving it by
+      // margins also leaves fixed descendants anchored to their viewport.
+      Object.assign(content.style, {
+        margin: `${-offset.top}px 0 0 ${-offset.left}px`,
+        boxSizing: 'border-box', width: `${offset.width}px`, height: `${offset.pageHeight}px`,
+        minWidth: '0', maxWidth: 'none', minHeight: '0', maxHeight: 'none',
+        overflow: 'visible', position: content.style.position === 'static' ? 'static' : 'relative',
+        inset: 'auto', transform: 'none', translate: 'none', rotate: 'none', scale: 'none',
+        border: '0', borderRadius: '0', boxShadow: 'none', outline: 'none',
+        background: 'transparent', opacity: '1', filter: 'none'
+      });
+    });
+
+    const image = new Image();
+    image.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(new XMLSerializer().serializeToString(svg));
+    await image.decode();
+    const canvas = document.createElement('canvas');
+    const ratio = options.pixelRatio || window.devicePixelRatio || 1;
+    canvas.width = options.width * ratio;
+    canvas.height = options.height * ratio;
+    // Match html-to-image's canvas limit for large captures.
+    const scale = Math.min(1, 16384 / canvas.width, 16384 / canvas.height);
+    if (scale < 1) { canvas.width *= scale; canvas.height *= scale; }
+    canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
+    return type === 'jpeg' ? canvas.toDataURL('image/jpeg', options.quality || 1) : canvas.toDataURL();
+  }
+
   function imageFallbackOptions(value) {
     if (value === false) return {};
     const placeholder = typeof value === 'string' && value ? value : BUILTIN_IMAGE_PLACEHOLDER;
@@ -493,11 +558,7 @@
             return customFilter ? customFilter(node) : true;
           };
 
-          if (imgOpts.type === 'jpeg') {
-            data.screenshot = await window.htmlToImage.toJpeg(document.documentElement, htmlToImageOpts);
-          } else {
-            data.screenshot = await window.htmlToImage.toPng(document.documentElement, htmlToImageOpts);
-          }
+          data.screenshot = await captureScreenshot(htmlToImageOpts, imgOpts.type);
         })(), opts.screenshotTimeout, 'Screenshot capture timed out');
       } catch (err) {
         console.debug('Screenshot unavailable; sending report without it:',
