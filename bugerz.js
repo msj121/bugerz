@@ -1,4 +1,17 @@
 (function(window, document){
+  // Embedded so a failed image never needs another network request to recover.
+  // Keep the downloadable copy in public/images/screenshot-placeholder.svg in sync.
+  const BUILTIN_IMAGE_PLACEHOLDER = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180" viewBox="0 0 320 180" role="img" aria-label="Image unavailable">
+  <rect width="320" height="180" fill="#f1f5f9"/>
+  <rect x="0.5" y="0.5" width="319" height="179" fill="none" stroke="#cbd5e1"/>
+  <g fill="none" stroke="#64748b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="140" y="52" width="40" height="32" rx="4"/>
+    <circle cx="151" cy="62" r="3"/>
+    <path d="m143 80 11-11 8 8 6-6 9 9"/>
+  </g>
+  <text x="160" y="112" text-anchor="middle" fill="#64748b" font-family="Arial, sans-serif" font-size="14">Image unavailable</text>
+</svg>`);
+
   // Default configuration
   const DEFAULTS = {
     publicKey: null,             // REQUIRED
@@ -19,17 +32,20 @@
     showPublicCheckbox: false,
     showEmailField: true,
     screenshot: true,
+    screenshotTimeout: 8000,
+    requestTimeout: 15000,
     screenshotLibUrl: 'https://unpkg.com/html-to-image@1.11.13/dist/html-to-image.js',
     formContainerSelector: null,
     screenshotOptions: {
-      type: 'jpeg',        // 'png' or 'jpeg'
-      quality: 0.5,         // only for jpeg: 0.0–1.0
-      pixelRatio: 0.5,      // scale down to 50% resolution
+      mode: 'viewport',    // 'viewport' (visible area) or 'full-page'
+      type: 'png',         // 'png' or 'jpeg'
+      quality: 1,          // only for jpeg: 0.0–1.0
+      pixelRatio: 1,       // full resolution for readability
       skipFonts: true,      // skip font embedding to avoid CORS issues
       cacheBust: false,     // disable cache busting for better performance
-      imagePlaceholder: undefined,  // optional: placeholder for failed cross-origin images
+      imagePlaceholder: true,  // true: built-in fallback; data URL: custom image; false: disable
       filter: undefined     // optional: function to filter out problematic nodes
-      // width: 800,        // you can also force an explicit width (only jpg)
+      // width: 800,        // optional override for the selected capture area's dimensions
       // height: 600
     },
     // Quick flag to auto-filter cross-origin resources (images, iframes, stylesheets)
@@ -49,12 +65,15 @@
     },
     // Callback invoked on successful report. Receives response JSON, e.g. { url: 'https://...' }// inside DEFAULTS:
     onSuccess: (resData) => {
+      document.getElementById('bugerz-notice')?.remove();
       const msg = document.createElement('div');
+      msg.id = 'bugerz-notice';
+      msg.setAttribute('role', 'status');
       msg.style.cssText =
-        'position:fixed; top:1em; right:1em; padding:0.8em 1.2em; z-index:99;' +
+        'position:fixed; top:1em; right:1em; padding:0.8em 2em 0.8em 1.2em; z-index:calc(var(--bz-zindex) + 1);' +
         'background:var(--bz-success); color:#fff; border-radius:var(--bz-radius); ' +
         'font-family:var(--bz-font); box-shadow:0 2px 6px rgba(0,0,0,0.2);' +
-        'overflow: hidden;';  // ensure close button stays inside
+        'max-width:calc(100vw - 2em); box-sizing:border-box; overflow-wrap:anywhere; overflow:hidden;';
 
       // Close button
       const close = document.createElement('button');
@@ -87,12 +106,15 @@
     },
 
     onError: (err) => {
+      document.getElementById('bugerz-notice')?.remove();
       const msg = document.createElement('div');
+      msg.id = 'bugerz-notice';
+      msg.setAttribute('role', 'alert');
       msg.style.cssText =
-        'position:fixed; top:1em; right:1em; padding:0.8em 1.2em; ' +
+        'position:fixed; top:1em; right:1em; padding:0.8em 2em 0.8em 1.2em; z-index:calc(var(--bz-zindex) + 1); ' +
         'background:var(--bz-error); color:#fff; border-radius:var(--bz-radius); ' +
         'font-family:var(--bz-font); box-shadow:0 2px 6px rgba(0,0,0,0.2);' +
-        'overflow: hidden;';
+        'max-width:calc(100vw - 2em); box-sizing:border-box; overflow-wrap:anywhere; overflow:hidden;';
 
       // Close button
       const close = document.createElement('button');
@@ -106,7 +128,7 @@
 
       // Error text
       const text = document.createElement('span');
-      text.textContent = `❌ Failed to send report: ${err}`;
+      text.textContent = `Couldn’t send your report: ${err.message || err}. Your text is still here—please try again.`;
       msg.appendChild(text);
 
       document.body.appendChild(msg);
@@ -159,6 +181,7 @@
         z-index: calc(var(--bz-zindex) - 1);
       }
       #bugerz-form-container {
+        box-sizing: border-box;
         display: none;
         position: fixed;
         top: 50%; left: 50%;
@@ -168,8 +191,12 @@
         border: 1px solid var(--bz-border);
         border-radius: var(--bz-radius);
         padding: 24px;
-        width: 360px;
-        max-width: 90%;
+        width: 408px;
+        max-width: calc(100vw - 32px);
+        max-height: calc(100dvh - 32px);
+        overflow: auto;
+        font-family: var(--bz-font);
+        line-height: 1.5;
         box-shadow: 0 4px 16px rgba(0,0,0,0.1);
         z-index: var(--bz-zindex);
       }
@@ -184,6 +211,7 @@
         border:1px solid var(--bz-border);
         border-radius:var(--bz-radius);
         font-size:0.9rem;
+        font-family:inherit;
         transition:border-color 0.2s ease;
       }
       #bugerz-form-container input:focus,
@@ -232,15 +260,17 @@
 
     const scheduleSend = () => {
       if (sendCount >= opts.autoSendLimit) return;
-      if (debounceTimer && debounceRuns < opts.maxDebounceCount) {
+      if (debounceTimer && debounceRuns < opts.autoSendMaxDebounceCount) {
         clearTimeout(debounceTimer);
         debounceRuns++;
+      } else if (debounceTimer) {
+        return;
       }
       debounceTimer = setTimeout(async () => {
         if(sendCount < opts.autoSendLimit && opts.publicKey) {
           try {
+            sendCount++; // Bound attempts even when delivery fails.
             await sendReport(opts, consoleBuffer, eventBuffer, lastFields);
-            sendCount++;
             debounceRuns = 0; // reset debounce count after successful send
           } catch (err) {
             console.debug('BugerZ: Error sending auto report:', err);
@@ -254,13 +284,13 @@
     ['log','warn','error','info'].forEach(level => {
       const orig = console[level];
       console[level] = function(...args) {
-        consoleBuffer.push({ level, args, timestamp: new Date().toISOString() });
+        consoleBuffer.push({ level, args: safeLogArgs(args), timestamp: new Date().toISOString() });
         orig.apply(console, args);
         if (level === 'error') {
           // send error report immediately if enabled
           if (opts && opts.autoSendOnError) {
             if (opts.publicKey) {
-              lastFields = { description: `Auto‐triggered on console.${level}:\n${args.join(' ')}`};
+              lastFields = { description: `Auto‐triggered on console.${level}:\n${safeLogArgs(args).map(value => typeof value === 'string' ? value : JSON.stringify(value)).join(' ')}`};
               scheduleSend();
             } else {
               console.debug('BugerZ: publicKey not set, cannot send error report');
@@ -271,13 +301,108 @@
     });
   }
 
+  function safeLogArgs(args) {
+    const seen = new WeakSet();
+    try {
+      return JSON.parse(JSON.stringify(args, (_, value) => {
+        if (typeof value === 'bigint') return value.toString();
+        if (value instanceof Error) return { name: value.name, message: value.message, stack: value.stack };
+        if (value && typeof value === 'object') {
+          if (seen.has(value)) return '[Circular]';
+          seen.add(value);
+        }
+        return value;
+      }));
+    } catch (_) { return ['[Unserializable console entry]']; }
+  }
+
   function trackEvents(buffer) {
-    ['click','keydown'].forEach(evt => {
-      document.addEventListener(evt, e =>
-        buffer.push({ type: evt, tag: e.target.tagName, x: e.clientX, y: e.clientY, key: e.key || null, timestamp: new Date().toISOString() }),
-        true
-      );
+    // Opt-in click breadcrumbs only. Never listen to typed characters or values.
+    document.addEventListener('click', e => {
+      if (!e.target || e.target.closest('input, textarea, [contenteditable], [data-bugerz-private], #bugerz-form-container')) return;
+      buffer.push({ type: 'click', tag: e.target.tagName, x: e.clientX, y: e.clientY, timestamp: new Date().toISOString() });
+    }, true);
+  }
+
+  function withTimeout(promise, milliseconds, message) {
+    let timer;
+    return Promise.race([promise, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), milliseconds);
+    })]).finally(() => clearTimeout(timer));
+  }
+
+  function loadScreenshotLibrary(opts) {
+    if (window.htmlToImage) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      const timer = setTimeout(() => finish(new Error('Screenshot library timed out')), opts.screenshotTimeout);
+      const finish = error => {
+        clearTimeout(timer);
+        script.onload = script.onerror = null;
+        if (error) { script.remove(); reject(error); }
+        else resolve();
+      };
+      script.src = opts.screenshotLibUrl;
+      script.onload = () => finish(window.htmlToImage ? null : new Error('Screenshot library unavailable'));
+      script.onerror = () => finish(new Error('Screenshot library could not load'));
+      document.head.appendChild(script);
     });
+  }
+
+  function screenshotBounds(mode) {
+    const root = document.documentElement;
+    const style = window.getComputedStyle(root);
+    const fullPage = mode === 'full-page';
+    const pageWidth = Math.max(root.scrollWidth, root.clientWidth);
+    const pageHeight = Math.max(root.scrollHeight, root.clientHeight);
+    return {
+      width: fullPage ? pageWidth : (root.clientWidth || window.innerWidth),
+      height: fullPage ? pageHeight : (root.clientHeight || window.innerHeight),
+      // Move the cloned document through layout, rather than a transform, so
+      // fixed and sticky elements stay anchored to the captured viewport.
+      style: {
+        // Set the shorthand together so cloned logical margins cannot override
+        // the horizontal or vertical offsets.
+        margin: `${(parseFloat(style.marginTop) || 0) - (fullPage ? 0 : window.scrollY)}px ${style.marginRight} ${style.marginBottom} ${(parseFloat(style.marginLeft) || 0) - (fullPage ? 0 : window.scrollX)}px`,
+        width: style.width,
+        height: `${pageHeight}px`
+      }
+    };
+  }
+
+  function imageFallbackOptions(value) {
+    if (value === false) return {};
+    const placeholder = typeof value === 'string' && value ? value : BUILTIN_IMAGE_PLACEHOLDER;
+    return {
+      imagePlaceholder: placeholder,
+      // Fetch can succeed with an invalid image (for example an HTML error
+      // page). Recover from decode errors too, using only the cloned image.
+      onImageErrorHandler: event => {
+        const image = event && event.target;
+        if (!image) return;
+        return new Promise(resolve => {
+          const currentSource = image.src || image.href?.baseVal;
+          let replacement = currentSource === placeholder ? BUILTIN_IMAGE_PLACEHOLDER : placeholder;
+          const finish = () => {
+            image.onload = image.onerror = null;
+            resolve();
+          };
+          const replace = () => {
+            if ('src' in image) image.src = replacement;
+            else if (image.href) image.href.baseVal = replacement;
+            else finish();
+          };
+          image.onload = finish;
+          image.onerror = () => {
+            if (replacement === BUILTIN_IMAGE_PLACEHOLDER) return finish();
+            // A broken custom placeholder gets one final built-in fallback.
+            replacement = BUILTIN_IMAGE_PLACEHOLDER;
+            replace();
+          };
+          replace();
+        });
+      }
+    };
   }
 
   function buildForm(opts) {
@@ -290,9 +415,9 @@
       <h2>Report a Bug</h2>
       <div class="field">
         <label for="bz-description">What happened?</label>
-        <textarea id="bz-description" name="description" rows="4" required placeholder="Describe the bug in full please."></textarea>
+        <textarea id="bz-description" name="description" rows="4" required placeholder="What were you trying to do, and what happened instead?"></textarea>
       </div>
-      ${opts.showEmailField ? `<div class="field"><label for="bz-email">Email (optional - get bug link & updates)</label><input type="email" id="bz-email" name="email" placeholder="your@example.com"></div>` : ''}
+      ${opts.showEmailField ? `<div class="field"><label for="bz-email">Email (optional, so the team can follow up)</label><input type="email" id="bz-email" name="email" placeholder="your@example.com"></div>` : ''}
       <div class="checkbox-field field">${opts.showPublicCheckbox ? `<input type="checkbox" id="bz-public" name="isPublic"><label for="bz-public">Make public</label>` : ''}
       </div>
       
@@ -313,85 +438,99 @@
       fields: fields || {}
     };
 
-    if(opts.screenshot) {
-      await new Promise(res => {
-        if (window.htmlToImage) return res();
-        const s = document.createElement('script');
-        s.src = opts.screenshotLibUrl;
-        s.onload = res;
-        document.head.appendChild(s);
-      });
+    if (opts.screenshot) {
       try {
-        const imgOpts = opts.screenshotOptions || {};
+        await withTimeout((async () => {
+          await loadScreenshotLibrary(opts);
+          const imgOpts = opts.screenshotOptions || {};
+          const bounds = screenshotBounds(imgOpts.mode);
         
-        // Build the options object for html-to-image
-        const htmlToImageOpts = {
-          quality: imgOpts.quality,
-          pixelRatio: imgOpts.pixelRatio,
-          width: imgOpts.width,
-          height: imgOpts.height,
-          skipFonts: imgOpts.skipFonts,
-          cacheBust: imgOpts.cacheBust
-        };
-        
-        // Add imagePlaceholder if provided
-        if (imgOpts.imagePlaceholder) {
-          htmlToImageOpts.imagePlaceholder = imgOpts.imagePlaceholder;
-        }
-        
-        // Add filter function - either custom or auto cross-origin filter
-        if (imgOpts.filter && typeof imgOpts.filter === 'function') {
-          // User provided custom filter
-          htmlToImageOpts.filter = imgOpts.filter;
-        } else if (opts.filterCrossOrigin) {
-          // Auto-filter cross-origin resources
-          htmlToImageOpts.filter = function(node) {
-            // Skip external images and iframes that cause CORS issues
-            if (node.tagName === 'IMG' || node.tagName === 'IFRAME') {
-              const src = node.src || (node.getAttribute && node.getAttribute('src')) || '';
-              // Skip if it's a cross-origin resource (not same origin or data URI)
-              if (src && !src.startsWith('data:') && !src.startsWith(window.location.origin) && !src.startsWith('/')) {
-                return false; // exclude this node
-              }
-            }
-            // Skip external stylesheets
-            if (node.tagName === 'LINK' && node.rel === 'stylesheet') {
-              const href = node.href || '';
-              if (href && !href.startsWith(window.location.origin) && !href.startsWith('/')) {
-                return false;
-              }
-            }
-            return true;
+          // Build the options object for html-to-image
+          const htmlToImageOpts = {
+            quality: imgOpts.quality,
+            pixelRatio: imgOpts.pixelRatio,
+            width: imgOpts.width || bounds.width,
+            height: imgOpts.height || bounds.height,
+            style: bounds.style,
+            skipFonts: imgOpts.skipFonts,
+            cacheBust: imgOpts.cacheBust,
+            ...imageFallbackOptions(imgOpts.imagePlaceholder)
           };
-        }
         
-        if (imgOpts.type === 'jpeg') {
-          data.screenshot = await window.htmlToImage.toJpeg(document.body, htmlToImageOpts);
-        } else {
-          data.screenshot = await window.htmlToImage.toPng(document.body, htmlToImageOpts);
-        }
+          // Add filter function - either custom or auto cross-origin filter
+          if (imgOpts.filter && typeof imgOpts.filter === 'function') {
+            // User provided custom filter
+            htmlToImageOpts.filter = imgOpts.filter;
+          } else if (opts.filterCrossOrigin) {
+            // Auto-filter cross-origin resources
+            htmlToImageOpts.filter = function(node) {
+              // Skip external images and iframes that cause CORS issues
+              if (node.tagName === 'IMG' || node.tagName === 'IFRAME') {
+                const src = node.src || (node.getAttribute && node.getAttribute('src')) || '';
+                // Skip if it's a cross-origin resource (not same origin or data URI)
+                if (src && !src.startsWith('data:') && !src.startsWith(window.location.origin) && !src.startsWith('/')) {
+                  return false; // exclude this node
+                }
+              }
+              // Skip external stylesheets
+              if (node.tagName === 'LINK' && node.rel === 'stylesheet') {
+                const href = node.href || '';
+                if (href && !href.startsWith(window.location.origin) && !href.startsWith('/')) {
+                  return false;
+                }
+              }
+              return true;
+            };
+          }
+        
+          const customFilter = htmlToImageOpts.filter;
+          htmlToImageOpts.filter = node => {
+            // Computed styles are already embedded by html-to-image. Cloning
+            // the head would also bring along stylesheets and page scripts.
+            if (node.tagName === 'HEAD') return false;
+            if (node.id && node.id.startsWith('bugerz-')) return false;
+            if (node.matches && node.matches('[data-bugerz-private], input[type="password"]')) return false;
+            return customFilter ? customFilter(node) : true;
+          };
+
+          if (imgOpts.type === 'jpeg') {
+            data.screenshot = await window.htmlToImage.toJpeg(document.documentElement, htmlToImageOpts);
+          } else {
+            data.screenshot = await window.htmlToImage.toPng(document.documentElement, htmlToImageOpts);
+          }
+        })(), opts.screenshotTimeout, 'Screenshot capture timed out');
       } catch (err) {
-        console.debug('Screenshot failed:', err);
+        console.debug('Screenshot unavailable; sending report without it:',
+          err?.message || 'An image or page resource could not be captured');
       }
     }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), opts.requestTimeout);
     try {
       const res = await fetch(opts.endpoint, {
-        method: 'POST',
+        method: 'POST', signal: controller.signal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data)
       });
-      const resData = await res.json();
-      if (!resData.ok) throw new Error(resData.message || res.statusText || res.status);  
-      // opts.onSuccess(resData);
+      const resData = await res.json().catch(() => ({}));
+      if (!res.ok || !resData.ok) throw new Error(resData.message || `Server returned ${res.status}`);
       return resData;
     } catch (err) {
-      console.debug('BugerZ: Error sending report:', err);
-      // opts.onError(err.message);
-      throw err; // re-throw to allow custom handling
-    }
+      if (err.name === 'AbortError') throw new Error('The request timed out. Please try again');
+      throw err;
+    } finally { clearTimeout(timer); }
   }
 
+  let reportFromClient = null;
+
   window.BugerZ = {
+    // Explicit programmatic reporting returns a promise; it never installs an
+    // automatic error handler or shows the form.
+    report: async function(fields = {}, options = {}) {
+      if (!reportFromClient) throw new Error('BugerZ.init must be called before BugerZ.report');
+      if (!fields || typeof fields !== 'object' || Array.isArray(fields)) throw new Error('Report fields must be an object');
+      return reportFromClient(fields, options);
+    },
     show: function() {
       const ov = document.getElementById('bugerz-overlay');
       const ct = document.getElementById('bugerz-form-container');
@@ -412,6 +551,10 @@
     init: function(userOptions = {}) {
       const opts = extend(extend({}, DEFAULTS), userOptions);
 
+      opts.screenshotOptions = extend(extend({}, DEFAULTS.screenshotOptions), userOptions.screenshotOptions || {});
+      for (const name of ['screenshotTimeout', 'requestTimeout']) {
+        if (!Number.isFinite(opts[name]) || opts[name] <= 0) opts[name] = DEFAULTS[name];
+      }
       opts.cssVars = extend({}, DEFAULTS.cssVars); //deep merge for cssVars
       if (userOptions.cssVars) extend(opts.cssVars, userOptions.cssVars);
       if (!opts.publicKey) throw new Error('BugerZ: publicKey is required');
@@ -420,6 +563,10 @@
       const eventBuf = opts.trackEvents ? new CircularBuffer(opts.eventBufferSize) : null;
       if (opts.trackConsole) hijackConsole(opts, consoleBuf, eventBuf);
       if (opts.trackEvents) trackEvents(eventBuf);
+      reportFromClient = (fields, options = {}) => sendReport(
+        { ...opts, screenshot: typeof options.screenshot === 'boolean' ? options.screenshot : opts.screenshot,
+          screenshotOptions: { ...opts.screenshotOptions, ...options.screenshotOptions } },
+        consoleBuf, eventBuf, fields);
 
       let overlay = document.getElementById('bugerz-overlay');
       if (!overlay) {
@@ -453,8 +600,9 @@
 
       form.addEventListener('submit', async e => {
         e.preventDefault();
+        if (form.classList.contains('loading')) return;
         form.classList.add('loading');
-        this.hide();
+        form.setAttribute('aria-busy', 'true');
         const spinner = container.querySelector('#bugerz-spinner');
         spinner.style.display = 'block';
 
@@ -464,14 +612,17 @@
         });
 
         try {
-          let sent = await sendReport( opts, consoleBuf, eventBuf, fields);
+          let sent = await sendReport(opts, consoleBuf, eventBuf, fields);
           form.reset();
+          this.hide();
           if (opts.onSuccess) opts.onSuccess(sent);
         } catch (err) {
+          this.show();
           if (opts.onError) opts.onError(err);
         } finally {
           spinner.style.display = 'none';
           form.classList.remove('loading');
+          form.removeAttribute('aria-busy');
         }
       });
     }
