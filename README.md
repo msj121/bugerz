@@ -39,7 +39,7 @@ These are developer settings. The report form uses the configured capture area.
 
 Unavailable images use an embedded “Image unavailable” placeholder without another network request. A [downloadable SVG](images/screenshot-placeholder.svg) is included for customization. Leave `filterCrossOrigin: false` to attempt external images and replace failures; `true` omits those elements before placeholders apply. Malformed CSS backgrounds may remain blank.
 
-PNG at a pixel ratio of `1` is the default. For smaller attachments, use `type: 'jpeg'` with a lower `quality` or `pixelRatio`. Font embedding is skipped by default. Capture and report requests have timeouts; a failed screenshot does not prevent the description from being sent.
+PNG at a pixel ratio of `1` is the default. For smaller attachments, use `type: 'jpeg'` with a lower `quality` or `pixelRatio`. Font embedding is skipped by default. If a scrolled capture fails or stalls, the widget retries a standard capture from the top before omitting the image. The retry keeps the configured image format, dimensions, and privacy filters, and does not scroll the live page. If media also breaks the standard renderer, a final retry omits images, video, canvases, and embedded content to retain the page’s text and layout. All attempts share the screenshot timeout. If every attempt fails, the description still sends.
 
 ## Programmatic reports
 

@@ -372,17 +372,34 @@
 
   let screenshotSequence = 0;
 
-  async function captureScreenshot(options, type) {
+  function screenshotFailureMessage(error) {
+    if (error?.message) return error.message;
+    if (typeof error === 'string' && error) return error;
+    // Image loading can reject with a browser Event, which has no message.
+    return error?.type === 'error'
+      ? 'The browser could not load or render a screenshot image'
+      : 'An image or page resource could not be captured';
+  }
+
+  function checkScreenshot(dataUrl) {
+    // A zero-sized or oversized canvas can return "data:," without throwing.
+    if (typeof dataUrl !== 'string' || !/^data:image\/(png|jpeg);base64,.+/.test(dataUrl)) {
+      throw new Error('The browser returned an empty screenshot');
+    }
+    return dataUrl;
+  }
+
+  async function captureStandardScreenshot(options, type) {
+    const root = document.documentElement;
+    return checkScreenshot(await (type === 'jpeg'
+      ? window.htmlToImage.toJpeg(root, options) : window.htmlToImage.toPng(root, options)));
+  }
+
+  async function captureScrolledScreenshot(options, type, panels, timeout) {
     // html-to-image copies styles and children, but not element scroll offsets.
     // Mark scrolled panels so we can restore their visible contents in the SVG.
     const root = document.documentElement;
     const attribute = `data-bugerz-scroll-${++screenshotSequence}`;
-    const panels = Array.from(root.querySelectorAll('*')).filter(node =>
-      node !== document.scrollingElement && (node.scrollTop || node.scrollLeft));
-    if (!panels.length) {
-      return type === 'jpeg' ? window.htmlToImage.toJpeg(root, options) : window.htmlToImage.toPng(root, options);
-    }
-
     let svgUrl;
     const offsets = panels.map(node => ({
       top: node.scrollTop, left: node.scrollLeft,
@@ -391,11 +408,15 @@
     }));
     try {
       panels.forEach((node, index) => node.setAttribute(attribute, index));
-      svgUrl = await window.htmlToImage.toSvg(root, options);
+      // Clean up live markers even if the library never settles.
+      svgUrl = await withTimeout(window.htmlToImage.toSvg(root, options), timeout, 'Scrolled screenshot capture timed out');
     } finally {
       panels.forEach(node => node.removeAttribute(attribute));
     }
     const svg = new DOMParser().parseFromString(decodeURIComponent(svgUrl.slice(svgUrl.indexOf(',') + 1)), 'image/svg+xml');
+    if (svg.querySelector('parsererror') || svg.documentElement.localName !== 'svg') {
+      throw new Error('The scrolled screenshot contains invalid SVG');
+    }
     svg.querySelectorAll(`[${attribute}]`).forEach(content => {
       const offset = offsets[Number(content.getAttribute(attribute))];
       content.removeAttribute(attribute);
@@ -421,9 +442,17 @@
       });
     });
 
-    const image = new Image();
-    image.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(new XMLSerializer().serializeToString(svg));
-    await image.decode();
+    const image = await new Promise((resolve, reject) => {
+      const image = new Image();
+      // Wait for the SVG's load event before drawing its foreignObject, and
+      // turn message-less image events into actionable capture errors.
+      image.onload = () => { image.onload = image.onerror = null; resolve(image); };
+      image.onerror = () => {
+        image.onload = image.onerror = null;
+        reject(new Error('The browser could not render the scrolled screenshot SVG'));
+      };
+      image.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(new XMLSerializer().serializeToString(svg));
+    });
     const canvas = document.createElement('canvas');
     const ratio = options.pixelRatio || window.devicePixelRatio || 1;
     canvas.width = options.width * ratio;
@@ -431,8 +460,64 @@
     // Match html-to-image's canvas limit for large captures.
     const scale = Math.min(1, 16384 / canvas.width, 16384 / canvas.height);
     if (scale < 1) { canvas.width *= scale; canvas.height *= scale; }
-    canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
-    return type === 'jpeg' ? canvas.toDataURL('image/jpeg', options.quality || 1) : canvas.toDataURL();
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('The browser could not create a screenshot canvas');
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    return checkScreenshot(type === 'jpeg' ? canvas.toDataURL('image/jpeg', options.quality ?? 1) : canvas.toDataURL());
+  }
+
+  async function captureScreenshot(options, type, timeout) {
+    const root = document.documentElement;
+    const panels = Array.from(root.querySelectorAll('*')).filter(node => {
+      if (node === document.scrollingElement || !(node.scrollTop || node.scrollLeft)) return false;
+      if (node.namespaceURI && node.namespaceURI !== 'http://www.w3.org/1999/xhtml') return false;
+      // A scrolled textarea in the report form (or a private section) must not
+      // switch an otherwise ordinary screenshot into the panel capture path.
+      for (let ancestor = node; ancestor && ancestor !== root; ancestor = ancestor.parentElement) {
+        if (options.filter && !options.filter(ancestor)) return false;
+      }
+      return true;
+    });
+    const canFallback = panels.length > 0 || Boolean(window.scrollX || window.scrollY);
+    const deadline = Date.now() + timeout;
+    // Reserve time for a simpler capture if scroll reconstruction fails/hangs.
+    const primaryTimeout = canFallback ? Math.max(1, Math.floor(timeout * 0.65)) : timeout;
+    try {
+      return await withTimeout(panels.length
+        ? captureScrolledScreenshot(options, type, panels, primaryTimeout)
+        : captureStandardScreenshot(options, type), primaryTimeout, 'Screenshot capture timed out');
+    } catch (error) {
+      if (!canFallback) throw error;
+      // Standard html-to-image capture starts inner panels at the top. Also
+      // reset the cloned document's offset, keeping the requested dimensions
+      // and privacy filters, without scrolling or resizing the live page.
+      const fallbackOptions = { ...options, style: {
+        ...options.style, margin: screenshotBounds('full-page').style.margin
+      } };
+      const failures = [`Scrolled capture failed: ${screenshotFailureMessage(error)}`];
+      for (const omitMedia of [false, true]) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+        // A broken video, tainted canvas, or invalid embedded image can also
+        // break the standard renderer. Preserve the page's text/layout as a
+        // last resort, still applying every configured exclusion.
+        const retryOptions = omitMedia ? { ...fallbackOptions, filter: node =>
+          (!options.filter || options.filter(node)) &&
+          !['IMG', 'SVG', 'VIDEO', 'CANVAS', 'IFRAME', 'OBJECT', 'EMBED'].includes((node.tagName || '').toUpperCase())
+        } : fallbackOptions;
+        try {
+          const screenshot = await withTimeout(captureStandardScreenshot(retryOptions, type),
+            omitMedia ? remaining : Math.max(1, Math.floor(remaining * 0.6)), 'Screenshot fallback timed out');
+          console.debug(omitMedia
+            ? 'Screenshot captured from the top with media omitted after capture failed:'
+            : 'Screenshot captured from the top after scrolled capture failed:', failures.join('; '));
+          return screenshot;
+        } catch (fallbackError) {
+          failures.push(`${omitMedia ? 'Simplified' : 'Top-of-page'} fallback failed: ${screenshotFailureMessage(fallbackError)}`);
+        }
+      }
+      throw new Error(failures.join('; '));
+    }
   }
 
   function imageFallbackOptions(value) {
@@ -505,64 +590,64 @@
 
     if (opts.screenshot) {
       try {
-        await withTimeout((async () => {
-          await loadScreenshotLibrary(opts);
-          const imgOpts = opts.screenshotOptions || {};
-          const bounds = screenshotBounds(imgOpts.mode);
-        
-          // Build the options object for html-to-image
-          const htmlToImageOpts = {
-            quality: imgOpts.quality,
-            pixelRatio: imgOpts.pixelRatio,
-            width: imgOpts.width || bounds.width,
-            height: imgOpts.height || bounds.height,
-            style: bounds.style,
-            skipFonts: imgOpts.skipFonts,
-            cacheBust: imgOpts.cacheBust,
-            ...imageFallbackOptions(imgOpts.imagePlaceholder)
-          };
-        
-          // Add filter function - either custom or auto cross-origin filter
-          if (imgOpts.filter && typeof imgOpts.filter === 'function') {
-            // User provided custom filter
-            htmlToImageOpts.filter = imgOpts.filter;
-          } else if (opts.filterCrossOrigin) {
-            // Auto-filter cross-origin resources
-            htmlToImageOpts.filter = function(node) {
-              // Skip external images and iframes that cause CORS issues
-              if (node.tagName === 'IMG' || node.tagName === 'IFRAME') {
-                const src = node.src || (node.getAttribute && node.getAttribute('src')) || '';
-                // Skip if it's a cross-origin resource (not same origin or data URI)
-                if (src && !src.startsWith('data:') && !src.startsWith(window.location.origin) && !src.startsWith('/')) {
-                  return false; // exclude this node
-                }
-              }
-              // Skip external stylesheets
-              if (node.tagName === 'LINK' && node.rel === 'stylesheet') {
-                const href = node.href || '';
-                if (href && !href.startsWith(window.location.origin) && !href.startsWith('/')) {
-                  return false;
-                }
-              }
-              return true;
-            };
-          }
-        
-          const customFilter = htmlToImageOpts.filter;
-          htmlToImageOpts.filter = node => {
-            // Computed styles are already embedded by html-to-image. Cloning
-            // the head would also bring along stylesheets and page scripts.
-            if (node.tagName === 'HEAD') return false;
-            if (node.id && node.id.startsWith('bugerz-')) return false;
-            if (node.matches && node.matches('[data-bugerz-private], input[type="password"]')) return false;
-            return customFilter ? customFilter(node) : true;
-          };
+        const captureStarted = Date.now();
+        await loadScreenshotLibrary(opts);
+        const imgOpts = opts.screenshotOptions || {};
+        const bounds = screenshotBounds(imgOpts.mode);
 
-          data.screenshot = await captureScreenshot(htmlToImageOpts, imgOpts.type);
-        })(), opts.screenshotTimeout, 'Screenshot capture timed out');
+        // Build the options object for html-to-image
+        const htmlToImageOpts = {
+          quality: imgOpts.quality,
+          pixelRatio: imgOpts.pixelRatio,
+          width: imgOpts.width || bounds.width,
+          height: imgOpts.height || bounds.height,
+          style: bounds.style,
+          skipFonts: imgOpts.skipFonts,
+          cacheBust: imgOpts.cacheBust,
+          ...imageFallbackOptions(imgOpts.imagePlaceholder)
+        };
+
+        // Add filter function - either custom or auto cross-origin filter
+        if (imgOpts.filter && typeof imgOpts.filter === 'function') {
+          // User provided custom filter
+          htmlToImageOpts.filter = imgOpts.filter;
+        } else if (opts.filterCrossOrigin) {
+          // Auto-filter cross-origin resources
+          htmlToImageOpts.filter = function(node) {
+            // Skip external images and iframes that cause CORS issues
+            if (node.tagName === 'IMG' || node.tagName === 'IFRAME') {
+              const src = node.src || (node.getAttribute && node.getAttribute('src')) || '';
+              // Skip if it's a cross-origin resource (not same origin or data URI)
+              if (src && !src.startsWith('data:') && !src.startsWith(window.location.origin) && !src.startsWith('/')) {
+                return false; // exclude this node
+              }
+            }
+            // Skip external stylesheets
+            if (node.tagName === 'LINK' && node.rel === 'stylesheet') {
+              const href = node.href || '';
+              if (href && !href.startsWith(window.location.origin) && !href.startsWith('/')) {
+                return false;
+              }
+            }
+            return true;
+          };
+        }
+
+        const customFilter = htmlToImageOpts.filter;
+        htmlToImageOpts.filter = node => {
+          // Computed styles are already embedded by html-to-image. Cloning
+          // the head would also bring along stylesheets and page scripts.
+          if (node.tagName === 'HEAD') return false;
+          if (node.id && node.id.startsWith('bugerz-')) return false;
+          if (node.matches && node.matches('[data-bugerz-private], input[type="password"]')) return false;
+          return customFilter ? customFilter(node) : true;
+        };
+
+        const remaining = opts.screenshotTimeout - (Date.now() - captureStarted);
+        if (remaining <= 0) throw new Error('Screenshot capture timed out');
+        data.screenshot = await captureScreenshot(htmlToImageOpts, imgOpts.type, remaining);
       } catch (err) {
-        console.debug('Screenshot unavailable; sending report without it:',
-          err?.message || 'An image or page resource could not be captured');
+        console.debug('Screenshot unavailable; sending report without it:', screenshotFailureMessage(err));
       }
     }
     const controller = new AbortController();
