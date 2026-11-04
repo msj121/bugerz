@@ -59,3 +59,5 @@ The widget, password inputs, and elements marked `data-bugerz-private` are exclu
 Compared with the older client, screenshots now default to the visible area and full-resolution PNG rather than a reduced-resolution full-page JPEG. Set explicit screenshot options if your installation needs the previous capture area or smaller attachments.
 
 The screenshot helper remains [html-to-image](https://github.com/bubkoo/html-to-image), loaded on demand from `https://unpkg.com/html-to-image@1.11.13/dist/html-to-image.js`. This is a third-party dependency, separate from the Bugerz client distributions above.
+
+The default helper uses Subresource Integrity and a no-referrer policy. For a custom or self-hosted helper, set `screenshotLibUrl` and optionally `screenshotLibIntegrity` to that file's integrity hash. The built-in hash is not applied to a different helper URL. If the helper fails to load or its integrity check fails, the report still sends without a screenshot.

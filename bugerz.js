@@ -35,6 +35,7 @@
     screenshotTimeout: 8000,
     requestTimeout: 15000,
     screenshotLibUrl: 'https://unpkg.com/html-to-image@1.11.13/dist/html-to-image.js',
+    screenshotLibIntegrity: 'sha384-Tha/42qsYmpYmQ07pX+nJzkKumO0BzKJxK/uzVc7xyBQxVCUgQBhQIG8L7vXK+9C',
     formContainerSelector: null,
     screenshotOptions: {
       mode: 'viewport',    // 'viewport' (visible area) or 'full-page'
@@ -343,6 +344,10 @@
         else resolve();
       };
       script.src = opts.screenshotLibUrl;
+      // A custom/self-hosted helper can supply its own integrity hash. Do not
+      // apply the built-in helper's hash to a different URL.
+      if(opts.screenshotLibIntegrity){script.integrity=opts.screenshotLibIntegrity;script.crossOrigin='anonymous';}
+      script.referrerPolicy='no-referrer';
       script.onload = () => finish(window.htmlToImage ? null : new Error('Screenshot library unavailable'));
       script.onerror = () => finish(new Error('Screenshot library could not load'));
       document.head.appendChild(script);
@@ -696,6 +701,7 @@
     },
     init: function(userOptions = {}) {
       const opts = extend(extend({}, DEFAULTS), userOptions);
+      if(opts.screenshotLibUrl!==DEFAULTS.screenshotLibUrl&&!Object.hasOwn(userOptions,'screenshotLibIntegrity'))opts.screenshotLibIntegrity=null;
 
       opts.screenshotOptions = extend(extend({}, DEFAULTS.screenshotOptions), userOptions.screenshotOptions || {});
       for (const name of ['screenshotTimeout', 'requestTimeout']) {
